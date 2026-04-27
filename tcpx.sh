@@ -1342,9 +1342,17 @@ install_xanmod_generic() {
 	}
 
 	apt update
-	apt-get install gnupg gnupg2 gnupg1 sudo wget -y
-	echo 'deb http://deb.xanmod.org releases main' | tee /etc/apt/sources.list.d/xanmod-kernel.list
-	wget -qO - https://dl.xanmod.org/gpg.key | gpg --dearmor --yes -o /etc/apt/trusted.gpg.d/xanmod-kernel.gpg
+	apt-get install gnupg gnupg2 gnupg1 wget -y
+
+	# 清除可能存在的旧版或重复源 (兼容 PR 提到的 .sources 与冲突问题)
+	rm -f /etc/apt/sources.list.d/xanmod-kernel.list
+	rm -f /etc/apt/sources.list.d/xanmod-release.list
+	rm -f /etc/apt/sources.list.d/xanmod-kernel.sources
+	sed -i '/deb.xanmod.org/d' /etc/apt/sources.list 2>/dev/null
+
+	# 使用现代化的 signed-by 格式写入 GPG 密钥与源，彻底消除 apt 警告
+	wget -qO - https://dl.xanmod.org/gpg.key | gpg --dearmor --yes -o /usr/share/keyrings/xanmod-archive-keyring.gpg
+	echo 'deb [signed-by=/usr/share/keyrings/xanmod-archive-keyring.gpg] http://deb.xanmod.org releases main' | tee /etc/apt/sources.list.d/xanmod-kernel.list
 
 	wget -qO check_x86-64_psabi.sh https://dl.xanmod.org/check_x86-64_psabi.sh
 	chmod +x check_x86-64_psabi.sh
