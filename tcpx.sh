@@ -6,7 +6,7 @@ export PATH
 # =================================================
 #  全局配置区 (Configuration as Data)
 # =================================================
-readonly SH_VER="100.0.5.1" # 建议重构后升个小版本号
+readonly SH_VER="100.0.5.2" # 建议重构后升个小版本号
 readonly GITHUB_RAW_URL="https://raw.githubusercontent.com/ylx2016/Linux-NetSpeed/master"
 readonly GITHUB_API_URL="https://api.github.com/repos/ylx2016/kernel/releases"
 
@@ -1500,7 +1500,7 @@ check_status() {
 	lotspeed_status=""
 	if lsmod | grep -q "lotspeed"; then
 		if [[ "$net_congestion_control" == "lotspeed" ]]; then
-			lotspeed_status="LotSpeed已启用"
+			run_status="LotSpeed启动成功" # 直接覆盖掉上面错误的“未安装”提示
 		else
 			lotspeed_status="LotSpeed已加载(未设为默认)"
 		fi
