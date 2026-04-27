@@ -6,7 +6,7 @@ export PATH
 # =================================================
 #  全局配置区 (Configuration as Data)
 # =================================================
-readonly SH_VER="100.0.5.3" # By Gemini
+readonly SH_VER="100.0.5.5" # 建议重构后升个小版本号
 readonly GITHUB_RAW_URL="https://raw.githubusercontent.com/ylx2016/Linux-NetSpeed/master"
 readonly GITHUB_API_URL="https://api.github.com/repos/ylx2016/kernel/releases"
 
@@ -789,23 +789,112 @@ BBR_grub() {
 	fi
 }
 
-# 一键清理所有未使用的多余内核
-delete_kernel_custom() {
-	BBR_grub
-	local current_kernel=$(uname -r)
-	echo -e "${TIP} 当前正在运行的内核是: ${current_kernel}"
-	echo -e "${TIP} 请确保您已经【重启并成功进入】了新内核，再执行清理操作！"
-	read -p "按回车键确认清理其余旧内核，或按 Ctrl+C 退出..."
-
-	echo -e "${INFO} 开始智能扫描并卸载多余内核..."
+# 查看已安装的内核与排序
+show_kernels() {
+	clear
+	echo -e "${INFO} ==================================================="
+	echo -e "${INFO} 当前系统中已安装的内核包："
 	if [[ "${OS_TYPE}" == "CentOS" ]]; then
-		rpm -qa | grep -E "^kernel-(image|core|modules|devel|headers)" | grep -v "${current_kernel}" | grep -v "noarch" | xargs -r rpm -e --nodeps
+		rpm -qa | grep -E "^kernel-(image|core|modules|devel|headers)" | sort -V
+		echo -e "${INFO} ==================================================="
+		echo -e "${INFO} GRUB 引导项 (通常 index=0 为默认启动项)："
+		grubby --info=ALL | grep -E "^kernel|^index"
 	elif [[ "${OS_TYPE}" == "Debian" ]]; then
-		dpkg -l | grep -E "^ii  linux-(image|headers|modules)" | awk '{print $2}' | grep -v "${current_kernel}" | xargs -r apt-get purge -y
+		dpkg -l | grep -E "^ii  linux-(image|headers|modules)" | awk '{print $2, $3}' | column -t | sort -V
+		echo -e "${INFO} ==================================================="
+		echo -e "${INFO} /boot 目录下的内核镜像："
+		ls -1v /boot/vmlinuz-* 2>/dev/null
+	fi
+	echo -e "${INFO} ==================================================="
+	echo -e "${TIP} 当前实际正在运行的内核: ${GREEN_FONT_PREFIX}$(uname -r)${FONT_COLOR_SUFFIX}"
+	echo ""
+	read -p "按回车键返回主菜单..."
+	start_menu
+}
+
+# 高级交互式内核管理 (精准多选删除)
+delete_kernel_custom() {
+	clear
+	echo -e "${INFO} ==================================================="
+	echo -e "${INFO} 正在扫描系统中已安装的内核包..."
+	local current_kernel=$(uname -r)
+	local kernel_list=()
+
+	# 使用更精准的包查询方式，防止名字过长被截断
+	if [[ "${OS_TYPE}" == "CentOS" ]]; then
+		mapfile -t kernel_list < <(rpm -qa | grep -E "^kernel-(image|core|modules|devel|headers)" | sort -V)
+	elif [[ "${OS_TYPE}" == "Debian" ]]; then
+		mapfile -t kernel_list < <(dpkg-query -W -f='${Package}\n' | grep -E "^linux-(image|headers|modules)" | sort -V)
+	fi
+
+	if [[ ${#kernel_list[@]} -eq 0 ]]; then
+		echo -e "${ERROR} 未检测到可管理的内核包。"
+		sleep 2; start_menu; return
+	fi
+
+	echo -e "${TIP} 当前正在运行的内核: ${GREEN_FONT_PREFIX}${current_kernel}${FONT_COLOR_SUFFIX}"
+	echo -e "${INFO} ==================================================="
+	
+	# 打印带编号的内核列表，并高亮保护当前运行的内核
+	for i in "${!kernel_list[@]}"; do
+		local pkg="${kernel_list[$i]}"
+		if [[ "$pkg" == *"$current_kernel"* ]]; then
+			echo -e "  ${GREEN_FONT_PREFIX}[$i] ${pkg} [*运行中/受保护*]${FONT_COLOR_SUFFIX}"
+		else
+			echo -e "  [$i] ${pkg}"
+		fi
+	done
+	echo -e "${INFO} ==================================================="
+	echo -e "${TIP} 💡 提示: 若要强制指定某个内核启动，最安全的做法是【删掉比它版本更高的其他内核】"
+	echo ""
+	read -p "请输入要【删除】的内核编号 (多选请用空格分隔，例如 '0 2 3'，直接回车取消): " del_choices
+	
+	if [[ -z "$del_choices" ]]; then
+		echo -e "${INFO} 已取消操作，返回主菜单。"
+		sleep 2; start_menu; return
+	fi
+
+	# 遍历用户输入，提取包名并进行安全拦截
+	local pkgs_to_del=""
+	for idx in $del_choices; do
+		if [[ "$idx" =~ ^[0-9]+$ ]] && [[ "$idx" -ge 0 ]] && [[ "$idx" -lt ${#kernel_list[@]} ]]; then
+			local selected_pkg="${kernel_list[$idx]}"
+			# 终极防砖机制：即使用户选了当前内核，脚本也会强行拦截
+			if [[ "$selected_pkg" == *"$current_kernel"* ]]; then
+				echo -e "${ERROR} 拒绝执行: 编号 [$idx] 是当前正在运转的内核，为防止系统崩溃，已强行跳过！"
+			else
+				pkgs_to_del="$pkgs_to_del $selected_pkg"
+			fi
+		else
+			echo -e "${TIP} 无效的编号: $idx，已忽略。"
+		fi
+	done
+
+	if [[ -z "$pkgs_to_del" ]]; then
+		echo -e "${INFO} 没有选择有效的多余内核，操作结束。"
+		sleep 2; start_menu; return
+	fi
+
+	echo -e "${TIP} 即将从系统中彻底卸载以下内核包:"
+	echo -e "${RED_FONT_PREFIX}${pkgs_to_del}${FONT_COLOR_SUFFIX}"
+	read -p "请确认是否卸载？(Y/n): " confirm
+	if [[ "$confirm" =~ ^[nN]$ ]]; then
+		echo -e "${INFO} 操作已取消。"
+		sleep 2; start_menu; return
+	fi
+
+	echo -e "${INFO} 正在执行安全卸载，请稍候..."
+	if [[ "${OS_TYPE}" == "CentOS" ]]; then
+		rpm -e --nodeps $pkgs_to_del
+	elif [[ "${OS_TYPE}" == "Debian" ]]; then
+		apt-get purge -y $pkgs_to_del
 		apt-get autoremove -y >/dev/null 2>&1
 	fi
+
 	BBR_grub
-	echo -e "${INFO} 多余内核卸载完毕！"
+	echo -e "${INFO} 指定内核卸载完毕！引导项已自动更新。"
+	sleep 2
+	start_menu
 }
 
 # 编译安装 brutal
@@ -1010,7 +1099,7 @@ start_menu() {
 	36) openipv6 ;;
 	37) update_sysctl_interactive ;;
 	38) edit_sysctl_interactive ;;
-	51) BBR_grub ;;
+	51) show_kernels ;;
 	52) delete_kernel_custom ;;
 	55) remove_all ;;
 	60) gotoipcheck ;;
