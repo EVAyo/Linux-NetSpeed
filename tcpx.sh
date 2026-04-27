@@ -6,7 +6,7 @@ export PATH
 # =================================================
 #  全局配置区 (Configuration as Data)
 # =================================================
-readonly SH_VER="100.0.5.5" # 建议重构后升个小版本号
+readonly SH_VER="100.0.5.6" # By Gemini
 readonly GITHUB_RAW_URL="https://raw.githubusercontent.com/ylx2016/Linux-NetSpeed/master"
 readonly GITHUB_API_URL="https://api.github.com/repos/ylx2016/kernel/releases"
 
@@ -812,7 +812,7 @@ show_kernels() {
 	start_menu
 }
 
-# 高级交互式内核管理 (精准多选删除)
+# 高级交互式内核管理 (精准多选删除，支持删除当前内核)
 delete_kernel_custom() {
 	clear
 	echo -e "${INFO} ==================================================="
@@ -829,41 +829,45 @@ delete_kernel_custom() {
 
 	if [[ ${#kernel_list[@]} -eq 0 ]]; then
 		echo -e "${ERROR} 未检测到可管理的内核包。"
-		sleep 2; start_menu; return
+		sleep 2
+		start_menu
+		return
 	fi
 
 	echo -e "${TIP} 当前正在运行的内核: ${GREEN_FONT_PREFIX}${current_kernel}${FONT_COLOR_SUFFIX}"
 	echo -e "${INFO} ==================================================="
-	
-	# 打印带编号的内核列表，并高亮保护当前运行的内核
+
+	# 打印带编号的内核列表
 	for i in "${!kernel_list[@]}"; do
 		local pkg="${kernel_list[$i]}"
 		if [[ "$pkg" == *"$current_kernel"* ]]; then
-			echo -e "  ${GREEN_FONT_PREFIX}[$i] ${pkg} [*运行中/受保护*]${FONT_COLOR_SUFFIX}"
+			echo -e "  ${GREEN_FONT_PREFIX}[$i] ${pkg} [*当前运行中*]${FONT_COLOR_SUFFIX}"
 		else
 			echo -e "  [$i] ${pkg}"
 		fi
 	done
 	echo -e "${INFO} ==================================================="
-	echo -e "${TIP} 💡 提示: 若要强制指定某个内核启动，最安全的做法是【删掉比它版本更高的其他内核】"
+	echo -e "${TIP} 💡 提示: 若要强制指定某个内核启动，最安全的做法是【删掉其他所有内核】"
 	echo ""
 	read -p "请输入要【删除】的内核编号 (多选请用空格分隔，例如 '0 2 3'，直接回车取消): " del_choices
-	
+
 	if [[ -z "$del_choices" ]]; then
 		echo -e "${INFO} 已取消操作，返回主菜单。"
-		sleep 2; start_menu; return
+		sleep 2
+		start_menu
+		return
 	fi
 
-	# 遍历用户输入，提取包名并进行安全拦截
+	# 遍历用户输入，提取包名
 	local pkgs_to_del=""
+	local is_del_current=0
 	for idx in $del_choices; do
 		if [[ "$idx" =~ ^[0-9]+$ ]] && [[ "$idx" -ge 0 ]] && [[ "$idx" -lt ${#kernel_list[@]} ]]; then
 			local selected_pkg="${kernel_list[$idx]}"
-			# 终极防砖机制：即使用户选了当前内核，脚本也会强行拦截
+			pkgs_to_del="$pkgs_to_del $selected_pkg"
+			# 标记是否包含当前内核
 			if [[ "$selected_pkg" == *"$current_kernel"* ]]; then
-				echo -e "${ERROR} 拒绝执行: 编号 [$idx] 是当前正在运转的内核，为防止系统崩溃，已强行跳过！"
-			else
-				pkgs_to_del="$pkgs_to_del $selected_pkg"
+				is_del_current=1
 			fi
 		else
 			echo -e "${TIP} 无效的编号: $idx，已忽略。"
@@ -871,19 +875,39 @@ delete_kernel_custom() {
 	done
 
 	if [[ -z "$pkgs_to_del" ]]; then
-		echo -e "${INFO} 没有选择有效的多余内核，操作结束。"
-		sleep 2; start_menu; return
+		echo -e "${INFO} 没有选择有效的内核，操作结束。"
+		sleep 2
+		start_menu
+		return
 	fi
 
 	echo -e "${TIP} 即将从系统中彻底卸载以下内核包:"
 	echo -e "${RED_FONT_PREFIX}${pkgs_to_del}${FONT_COLOR_SUFFIX}"
-	read -p "请确认是否卸载？(Y/n): " confirm
-	if [[ "$confirm" =~ ^[nN]$ ]]; then
-		echo -e "${INFO} 操作已取消。"
-		sleep 2; start_menu; return
+
+	# 强力警告与二次确认机制
+	if [[ $is_del_current -eq 1 ]]; then
+		echo -e ""
+		echo -e "${ERROR} 高危警告！您选择了删除【当前正在运行的内核】！"
+		echo -e "${TIP} 卸载当前运行中的内核，可能会导致您的 SSH 连接中断。"
+		echo -e "${TIP} 请务必确保系统中还有【至少一个其他已正常安装的内核】，否则重启后机器将变砖失联！"
+		read -p "您确定要继续删除选中的内核包吗？(请输入大写的 YES 确认): " confirm_danger
+		if [[ "$confirm_danger" != "YES" ]]; then
+			echo -e "${INFO} 操作已取消，出于安全考虑未执行删除。"
+			sleep 2
+			start_menu
+			return
+		fi
+	else
+		read -p "请确认是否卸载？(Y/n): " confirm
+		if [[ "$confirm" =~ ^[nN]$ ]]; then
+			echo -e "${INFO} 操作已取消。"
+			sleep 2
+			start_menu
+			return
+		fi
 	fi
 
-	echo -e "${INFO} 正在执行安全卸载，请稍候..."
+	echo -e "${INFO} 正在执行卸载，如果遇到断开连接请不要惊慌，稍等几分钟后尝试重启服务器..."
 	if [[ "${OS_TYPE}" == "CentOS" ]]; then
 		rpm -e --nodeps $pkgs_to_del
 	elif [[ "${OS_TYPE}" == "Debian" ]]; then
