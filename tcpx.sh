@@ -6,7 +6,7 @@ export PATH
 # =================================================
 #  全局配置区 (Configuration as Data)
 # =================================================
-readonly SH_VER="100.0.5.7"
+readonly SH_VER="100.0.5.8"
 readonly GITHUB_RAW_URL="https://raw.githubusercontent.com/ylx2016/Linux-NetSpeed/master"
 readonly GITHUB_API_URL="https://api.github.com/repos/ylx2016/kernel/releases"
 
@@ -1400,6 +1400,10 @@ edit_sysctl_interactive() {
 #  官方源内核安装模块 (修复自适应变量)
 # =================================================
 
+# =================================================
+#  官方源内核安装模块 (包含 CentOS 10 战未来支持)
+# =================================================
+
 #检查官方稳定内核并安装
 check_sys_official() {
 	if [[ "${OS_TYPE}" == "CentOS" ]]; then
@@ -1409,7 +1413,8 @@ check_sys_official() {
 		}
 		if [[ "${OS_VERSION_ID}" == "7" ]]; then
 			yum install kernel kernel-headers -y --skip-broken
-		elif [[ "${OS_VERSION_ID}" == "8" ]]; then
+		elif [[ "${OS_VERSION_ID}" == "8" || "${OS_VERSION_ID}" == "9" || "${OS_VERSION_ID}" == "10" ]]; then
+			# CentOS 8、9、10 都是同样的包结构
 			yum install kernel kernel-core kernel-headers -y --skip-broken
 		else
 			echo -e "${ERROR} 不支持当前系统 CentOS ${OS_VERSION_ID} !" && exit 1
@@ -1440,6 +1445,15 @@ check_sys_official_bbr() {
 		elif [[ "${OS_VERSION_ID}" == "8" ]]; then
 			yum install https://www.elrepo.org/elrepo-release-8.el8.elrepo.noarch.rpm -y
 			yum --enablerepo=elrepo-kernel install kernel-ml kernel-ml-headers -y --skip-broken
+		elif [[ "${OS_VERSION_ID}" == "9" ]]; then
+			yum install https://www.elrepo.org/elrepo-release-9.el9.elrepo.noarch.rpm -y
+			yum --enablerepo=elrepo-kernel install kernel-ml kernel-ml-headers -y --skip-broken
+		elif [[ "${OS_VERSION_ID}" == "10" ]]; then
+			# 补充 CentOS 10 的 ELRepo 源安装逻辑 (战未来)
+			yum install https://www.elrepo.org/elrepo-release-10.el10.elrepo.noarch.rpm -y
+			yum --enablerepo=elrepo-kernel install kernel-ml kernel-ml-headers -y --skip-broken
+		else
+			echo -e "${ERROR} 不支持当前系统 CentOS ${OS_VERSION_ID} !" && exit 1
 		fi
 	elif [[ "${OS_TYPE}" == "Debian" ]]; then
 		local codename=$(lsb_release -cs 2>/dev/null || echo "")
