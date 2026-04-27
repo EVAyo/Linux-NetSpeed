@@ -6,7 +6,7 @@ export PATH
 # =================================================
 #  全局配置区 (Configuration as Data)
 # =================================================
-readonly SH_VER="100.0.5.0" # By Gemini
+readonly SH_VER="100.0.5.1" # 建议重构后升个小版本号
 readonly GITHUB_RAW_URL="https://raw.githubusercontent.com/ylx2016/Linux-NetSpeed/master"
 readonly GITHUB_API_URL="https://api.github.com/repos/ylx2016/kernel/releases"
 
@@ -499,6 +499,12 @@ optimizing_system() {
 	local kernel_major=$(uname -r | cut -d. -f1)
 	local kernel_minor=$(uname -r | cut -d. -f2)
 
+	# 新增：动态获取当前正在使用的拥塞控制算法，防止覆盖 LotSpeed 或其它自定义算法
+	local current_cc=$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null || echo "bbr")
+	local current_qdisc=$(cat /proc/sys/net/core/default_qdisc 2>/dev/null || echo "fq")
+	[[ "$current_cc" == "unknown" || -z "$current_cc" ]] && current_cc="bbr"
+	[[ "$current_qdisc" == "unknown" || -z "$current_qdisc" ]] && current_qdisc="fq"
+
 	# 2. 根据内存大小动态适配网络缓存与文件描述符
 	local tcp_mem_max somaxconn file_max
 	if [ "$total_mem_mb" -ge 8192 ]; then
@@ -595,9 +601,9 @@ net.ipv6.conf.lo.forwarding = 1
 net.ipv6.conf.all.disable_ipv6 = 0
 net.ipv6.conf.default.disable_ipv6 = 0
 
-# --- 默认拥塞控制 ---
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
+# --- 默认拥塞控制 (动态继承) ---
+net.core.default_qdisc = $current_qdisc
+net.ipv4.tcp_congestion_control = $current_cc
 EOF
 
 	# 5. 根据内核版本进行高级参数兼容
@@ -680,12 +686,10 @@ remove_bbr_lotserver() {
 	sysctl --system >/dev/null 2>&1
 	rm -rf bbrmod
 
-	# 新增：彻底清理 LotSpeed 的逻辑
+	# 修改：停用并卸载 LotSpeed 模块 (但不物理删除文件，以便随时通过菜单快速切换)
 	if command -v lotspeed >/dev/null 2>&1; then
 		lotspeed stop >/dev/null 2>&1
 		rmmod lotspeed >/dev/null 2>&1
-		rm -f /usr/local/bin/lotspeed
-		rm -rf /opt/lotspeed
 	fi
 	# 如果没有 helper 脚本但也加载了模块的兜底清理
 	if lsmod | grep -q "lotspeed"; then
@@ -753,6 +757,9 @@ remove_all() {
 
 	systemctl daemon-reload
 	remove_bbr_lotserver
+	# 新增：彻底卸载时，物理清理 LotSpeed 残留文件
+	rm -f /usr/local/bin/lotspeed
+	rm -rf /opt/lotspeed
 	echo -e "${INFO} 系统已恢复原生状态。"
 }
 
@@ -833,6 +840,27 @@ install_lotspeed() {
 	else
 		echo -e "${ERROR} LotSpeed 模块加载失败，请检查上方编译日志（通常是因为内核 Headers 缺失或版本过低）。"
 	fi
+}
+
+# 单独启用 LotSpeed 加速 (免编译快速切换)
+enable_lotspeed_standalone() {
+	if ! command -v lotspeed >/dev/null 2>&1; then
+		echo -e "${ERROR} 未检测到 LotSpeed，请先执行菜单 [29] 进行编译安装！"
+		sleep 3
+		return
+	fi
+	remove_bbr_lotserver
+	echo -e "${INFO} 正在启动 LotSpeed 加速..."
+	lotspeed start >/dev/null 2>&1
+
+	# 确保将其写死为默认启动项
+	local sysctl_conf="/etc/sysctl.d/99-sysctl.conf"
+	sed -i '/net.ipv4.tcp_congestion_control/d; /net.core.default_qdisc/d' "$sysctl_conf" /etc/sysctl.conf 2>/dev/null
+	echo "net.core.default_qdisc=fq" >>"$sysctl_conf"
+	echo "net.ipv4.tcp_congestion_control=lotspeed" >>"$sysctl_conf"
+	sysctl --system >/dev/null 2>&1
+
+	echo -e "${INFO} LotSpeed 加速已成功切换并启用！"
 }
 
 # =================================================
@@ -919,29 +947,27 @@ start_menu() {
 	clear
 	echo && echo -e " TCP加速 一键安装管理脚本 ${RED_FONT_PREFIX}[v${SH_VER}] 不卸内核${FONT_COLOR_SUFFIX} from blog.ylx.me 母鸡慎用
  ${GREEN_FONT_PREFIX}0.${FONT_COLOR_SUFFIX} 升级脚本
- ${GREEN_FONT_PREFIX}9.${FONT_COLOR_SUFFIX} 切换到卸载内核版本        ${GREEN_FONT_PREFIX}10.${FONT_COLOR_SUFFIX} 切换到一键DD系统脚本
- ${GREEN_FONT_PREFIX}60.${FONT_COLOR_SUFFIX} 切换到检查当前IP质量/媒体解锁/邮箱通信脚本
+ ${GREEN_FONT_PREFIX}91.${FONT_COLOR_SUFFIX} 切换到卸载内核版本
  ———————————————————————————— 内核安装 —————————————————————————————
- ${GREEN_FONT_PREFIX}1.${FONT_COLOR_SUFFIX} 安装 BBR原版内核          ${GREEN_FONT_PREFIX}7.${FONT_COLOR_SUFFIX} 安装 Zen官方版内核
- ${GREEN_FONT_PREFIX}2.${FONT_COLOR_SUFFIX} 安装 BBRplus版内核        ${GREEN_FONT_PREFIX}5.${FONT_COLOR_SUFFIX} 安装 BBRplus新版内核
- ${GREEN_FONT_PREFIX}3.${FONT_COLOR_SUFFIX} 安装 Lotserver(锐速)内核  ${GREEN_FONT_PREFIX}8.${FONT_COLOR_SUFFIX} 安装 官方cloud内核
- ${GREEN_FONT_PREFIX}30.${FONT_COLOR_SUFFIX} 安装 官方稳定内核        ${GREEN_FONT_PREFIX}31.${FONT_COLOR_SUFFIX} 安装 官方最新内核
- ${GREEN_FONT_PREFIX}32.${FONT_COLOR_SUFFIX} 安装 XANMOD(main)        ${GREEN_FONT_PREFIX}33.${FONT_COLOR_SUFFIX} 安装 XANMOD(LTS)
- ${GREEN_FONT_PREFIX}36.${FONT_COLOR_SUFFIX} 安装 XANMOD(EDGE)        ${GREEN_FONT_PREFIX}37.${FONT_COLOR_SUFFIX} 安装 XANMOD(RT)
+ ${GREEN_FONT_PREFIX}1.${FONT_COLOR_SUFFIX} 安装 BBR原版内核         ${GREEN_FONT_PREFIX}7.${FONT_COLOR_SUFFIX} 安装 官方稳定内核
+ ${GREEN_FONT_PREFIX}2.${FONT_COLOR_SUFFIX} 安装 BBRplus版内核       ${GREEN_FONT_PREFIX}8.${FONT_COLOR_SUFFIX} 安装 官方最新内核
+ ${GREEN_FONT_PREFIX}3.${FONT_COLOR_SUFFIX} 安装 Lotserver(锐速)内核 ${GREEN_FONT_PREFIX}9.${FONT_COLOR_SUFFIX} 安装 XANMOD(main)
+ ${GREEN_FONT_PREFIX}4.${FONT_COLOR_SUFFIX} 安装 官方cloud内核       ${GREEN_FONT_PREFIX}10.${FONT_COLOR_SUFFIX} 安装 XANMOD(LTS)
+ ${GREEN_FONT_PREFIX}5.${FONT_COLOR_SUFFIX} 安装 BBRplus新版内核     ${GREEN_FONT_PREFIX}11.${FONT_COLOR_SUFFIX} 安装 XANMOD(EDGE)
+ ${GREEN_FONT_PREFIX}6.${FONT_COLOR_SUFFIX} 安装 Zen官方版内核       ${GREEN_FONT_PREFIX}12.${FONT_COLOR_SUFFIX} 安装 XANMOD(RT)
  ———————————————————————————— 加速启用 —————————————————————————————
- ${GREEN_FONT_PREFIX}11.${FONT_COLOR_SUFFIX} 使用BBR+FQ加速           ${GREEN_FONT_PREFIX}12.${FONT_COLOR_SUFFIX} 使用BBR+FQ_PIE加速 
- ${GREEN_FONT_PREFIX}13.${FONT_COLOR_SUFFIX} 使用BBR+CAKE加速         ${GREEN_FONT_PREFIX}14.${FONT_COLOR_SUFFIX} 使用BBR2+FQ加速
- ${GREEN_FONT_PREFIX}15.${FONT_COLOR_SUFFIX} 使用BBR2+FQ_PIE加速      ${GREEN_FONT_PREFIX}16.${FONT_COLOR_SUFFIX} 使用BBR2+CAKE加速
- ${GREEN_FONT_PREFIX}19.${FONT_COLOR_SUFFIX} 使用BBRplus+FQ版加速     ${GREEN_FONT_PREFIX}20.${FONT_COLOR_SUFFIX} 使用Lotserver(锐速)加速
- ${GREEN_FONT_PREFIX}28.${FONT_COLOR_SUFFIX} 编译安装brutal模块        ${GREEN_FONT_PREFIX}29.${FONT_COLOR_SUFFIX} 编译安装LotSpeed模块
+ ${GREEN_FONT_PREFIX}20.${FONT_COLOR_SUFFIX} 使用BBR+FQ加速          ${GREEN_FONT_PREFIX}21.${FONT_COLOR_SUFFIX} 使用BBR+FQ_PIE加速 
+ ${GREEN_FONT_PREFIX}22.${FONT_COLOR_SUFFIX} 使用BBR+CAKE加速        ${GREEN_FONT_PREFIX}23.${FONT_COLOR_SUFFIX} 使用BBRplus+FQ版加速
+ ${GREEN_FONT_PREFIX}24.${FONT_COLOR_SUFFIX} 使用Lotserver(锐速)加速 ${GREEN_FONT_PREFIX}25.${FONT_COLOR_SUFFIX} 编译安装brutal模块
+ ${GREEN_FONT_PREFIX}26.${FONT_COLOR_SUFFIX} 编译安装LotSpeed模块    ${GREEN_FONT_PREFIX}27.${FONT_COLOR_SUFFIX} 使用LotSpeed加速
  ———————————————————————————— 系统配置 —————————————————————————————
- ${GREEN_FONT_PREFIX}17.${FONT_COLOR_SUFFIX} 开启ECN                  ${GREEN_FONT_PREFIX}18.${FONT_COLOR_SUFFIX} 关闭ECN
- ${GREEN_FONT_PREFIX}21.${FONT_COLOR_SUFFIX} 系统网络自适应优化       ${GREEN_FONT_PREFIX}26.${FONT_COLOR_SUFFIX} 防CC/DDOS轻量优化
- ${GREEN_FONT_PREFIX}23.${FONT_COLOR_SUFFIX} 禁用IPv6                 ${GREEN_FONT_PREFIX}24.${FONT_COLOR_SUFFIX} 开启IPv6
- ${GREEN_FONT_PREFIX}61.${FONT_COLOR_SUFFIX} 手动提交合并内核参数     ${GREEN_FONT_PREFIX}62.${FONT_COLOR_SUFFIX} 手动编辑内核参数
+ ${GREEN_FONT_PREFIX}30.${FONT_COLOR_SUFFIX} 开启ECN                 ${GREEN_FONT_PREFIX}31.${FONT_COLOR_SUFFIX} 关闭ECN
+ ${GREEN_FONT_PREFIX}32.${FONT_COLOR_SUFFIX} 系统网络自适应优化      ${GREEN_FONT_PREFIX}33.${FONT_COLOR_SUFFIX} 防CC/DDOS轻量优化
+ ${GREEN_FONT_PREFIX}35.${FONT_COLOR_SUFFIX} 禁用IPv6                ${GREEN_FONT_PREFIX}36.${FONT_COLOR_SUFFIX} 开启IPv6
+ ${GREEN_FONT_PREFIX}37.${FONT_COLOR_SUFFIX} 手动提交合并内核参数    ${GREEN_FONT_PREFIX}38.${FONT_COLOR_SUFFIX} 手动编辑内核参数
  ———————————————————————————— 内核管理 —————————————————————————————
- ${GREEN_FONT_PREFIX}51.${FONT_COLOR_SUFFIX} 查看排序内核             ${GREEN_FONT_PREFIX}52.${FONT_COLOR_SUFFIX} 删除保留指定内核
- ${GREEN_FONT_PREFIX}25.${FONT_COLOR_SUFFIX} 卸载全部加速             ${GREEN_FONT_PREFIX}99.${FONT_COLOR_SUFFIX} 退出脚本 
+ ${GREEN_FONT_PREFIX}51.${FONT_COLOR_SUFFIX} 查看排序内核            ${GREEN_FONT_PREFIX}52.${FONT_COLOR_SUFFIX} 删除保留指定内核
+ ${GREEN_FONT_PREFIX}55.${FONT_COLOR_SUFFIX} 卸载全部加速            ${GREEN_FONT_PREFIX}99.${FONT_COLOR_SUFFIX} 退出脚本 
 ————————————————————————————————————————————————————————————————"
 	check_status
 	get_system_info
@@ -959,44 +985,42 @@ start_menu() {
 	1) installbbr ;;
 	2) installbbrplus ;;
 	3) installlot ;;
+	4) installcloud ;;
 	5) installbbrplusnew ;;
-	7) check_sys_official_zen ;;
-	8) installcloud ;;
-	30) check_sys_official ;;
-	31) check_sys_official_bbr ;;
-	32) check_sys_official_xanmod_main ;;
-	33) check_sys_official_xanmod_lts ;;
-	36) check_sys_official_xanmod_edge ;;
-	37) check_sys_official_xanmod_rt ;;
-	9) gototcp ;;
-	10) gotodd ;;
-	60) gotoipcheck ;;
-	11) enable_acceleration "fq" "bbr" ;;
-	12) enable_acceleration "fq_pie" "bbr" ;;
-	13) enable_acceleration "cake" "bbr" ;;
-	14) enable_acceleration "fq" "bbr2" ;;
-	15) enable_acceleration "fq_pie" "bbr2" ;;
-	16) enable_acceleration "cake" "bbr2" ;;
-	17) set_ecn "1" ;;
-	18) set_ecn "0" ;;
-	19) enable_acceleration "fq" "bbrplus" ;;
-	20) startlotserver ;;
-	21) optimizing_system ;;
-	23) closeipv6 ;;
-	24) openipv6 ;;
-	25) remove_all ;;
-	26) optimizing_ddcc ;;
-	28) startbrutal ;;
-	29) install_lotspeed ;;
+	6) check_sys_official_zen ;;
+	7) check_sys_official ;;
+	8) check_sys_official_bbr ;;
+	9) check_sys_official_xanmod_main ;;
+	10) check_sys_official_xanmod_lts ;;
+	11) check_sys_official_xanmod_edge ;;
+	12) check_sys_official_xanmod_rt ;;
+	20) enable_acceleration "fq" "bbr" ;;
+	21) enable_acceleration "fq_pie" "bbr" ;;
+	22) enable_acceleration "cake" "bbr" ;;
+	23) enable_acceleration "fq" "bbrplus" ;;
+	24) startlotserver ;;
+	25) startbrutal ;;
+	26) install_lotspeed ;;
+	27) enable_lotspeed_standalone ;;
+	30) set_ecn "1" ;;
+	31) set_ecn "0" ;;
+	32) optimizing_system ;;
+	33) optimizing_ddcc ;;
+	35) closeipv6 ;;
+	36) openipv6 ;;
+	37) update_sysctl_interactive ;;
+	38) edit_sysctl_interactive ;;
 	51) BBR_grub ;;
 	52) delete_kernel_custom ;;
-	61) update_sysctl_interactive ;;
-	62) edit_sysctl_interactive ;;
+	55) remove_all ;;
+	60) gotoipcheck ;;
+	91) gototcp ;;
+	92) gotodd ;;
 	99) exit 1 ;;
 	*)
 		clear
-		echo -e "${ERROR}: 请输入正确数字 [0-99]"
-		sleep 5s
+		echo -e "${ERROR}: 请输入正确数字"
+		sleep 3s
 		start_menu
 		;;
 	esac
