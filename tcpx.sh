@@ -6,7 +6,7 @@ export PATH
 # =================================================
 #  全局配置区 (Configuration as Data)
 # =================================================
-readonly SH_VER="100.0.5.6" # By Gemini
+readonly SH_VER="100.0.5.7"
 readonly GITHUB_RAW_URL="https://raw.githubusercontent.com/ylx2016/Linux-NetSpeed/master"
 readonly GITHUB_API_URL="https://api.github.com/repos/ylx2016/kernel/releases"
 
@@ -43,7 +43,13 @@ check_sys() {
 		# 直接 source 解析标准的 os-release 文件
 		. /etc/os-release
 		OS_ID="${ID:-unknown}"
-		OS_VERSION_ID="${VERSION_ID:-unknown}"
+		OS_VERSION_ID="${VERSION_ID:-}"
+		# 兼容 Debian testing/sid 没有 VERSION_ID 的情况
+		if [[ -z "$OS_VERSION_ID" && "$OS_ID" == "debian" && -f /etc/debian_version ]]; then
+			OS_VERSION_ID=$(grep -oE '^[0-9]+' /etc/debian_version | head -n 1)
+			[[ -z "$OS_VERSION_ID" ]] && OS_VERSION_ID=$(awk -F'/' '{print $1}' /etc/debian_version)
+		fi
+		[[ -z "$OS_VERSION_ID" ]] && OS_VERSION_ID="unknown"
 	elif [[ -f /etc/redhat-release || -f /etc/centos-release ]]; then
 		# 兼容极少数没有 os-release 的老旧 CentOS
 		OS_ID="centos"
@@ -170,34 +176,43 @@ safe_wget() {
 # 3. 稳健的 GitHub 资源获取函数 (使用 jq 提取 JSON)
 # 用法: get_github_asset <仓库名> <Tag关键词> <文件名关键词>
 # 示例: get_github_asset "ylx2016/kernel" "Debian_Kernel" "headers"
+# 3. 稳健的 GitHub 资源获取函数 (提取所有链接后通过 grep 多重过滤)
 get_github_asset() {
 	local repo="$1"
 	local tag_kw="$2"
 	local ast_kw="$3"
+	local arch_kw="$4" # 可选的架构关键词
 	local api_url="https://api.github.com/repos/${repo}/releases"
 
-	# 获取 GitHub API 返回数据，超时限制 10s
 	local response=$(curl -sL --max-time 10 "$api_url")
-
-	# 检查是否因为请求过频触发了 Rate Limit
 	if echo "$response" | grep -q "API rate limit exceeded"; then
 		echo -e "${ERROR} 触发 GitHub API 频率限制！(当前 IP 请求过多)" >&2
-		echo ""
 		return 1
 	fi
 
-	# 使用 jq 精确解析：
-	# 1. 找到 tag_name 包含 tag_kw 的最新 release
-	# 2. 找到 assets 中文件名包含 ast_kw 的下载链接 (browser_download_url)
-	local asset_url=$(echo "$response" | jq -r "[.[] | select(.tag_name | contains(\"$tag_kw\"))][0] | .assets[] | select(.name | contains(\"$ast_kw\")) | .browser_download_url" | head -n 1)
-
-	if [[ -z "$asset_url" || "$asset_url" == "null" ]]; then
-		echo -e "${ERROR} 无法在 ${repo} 中解析到匹配关键字 (${tag_kw} -> ${ast_kw}) 的文件！" >&2
-		echo ""
+	# 提取出该仓库所有的下载直链
+	local all_urls=$(echo "$response" | jq -r '.[].assets[]?.browser_download_url' 2>/dev/null)
+	if [[ -z "$all_urls" ]]; then
+		echo -e "${ERROR} 无法从 ${repo} 获取资源列表，请检查网络或稍后再试！" >&2
 		return 1
 	fi
 
-	# 将获取到的 URL 输出（调用时可通过变量捕获）
+	# 利用 grep -iE 进行层层精准过滤
+	local result=$(echo "$all_urls" | grep -iE "$tag_kw" | grep -iE "$ast_kw")
+	[[ -n "$arch_kw" ]] && result=$(echo "$result" | grep -iE "$arch_kw")
+
+	# 终极防呆机制：如果是 x86_64 架构，且关键词中没有声明要找 arm64，则强行排除带 arm64/aarch64 的链接，防止模糊匹配误伤
+	if [[ "$arch_kw" != *"arm64"* && "$tag_kw" != *"arm64"* && "$OS_ARCH" != "aarch64" ]]; then
+		result=$(echo "$result" | grep -viE "arm64|aarch64")
+	fi
+
+	local asset_url=$(echo "$result" | head -n 1)
+
+	if [[ -z "$asset_url" ]]; then
+		echo -e "${ERROR} 无法在 ${repo} 中解析到匹配关键字 (${tag_kw} -> ${ast_kw} -> ${arch_kw}) 的文件！" >&2
+		return 1
+	fi
+
 	echo "$asset_url"
 }
 
@@ -284,18 +299,22 @@ installbbr() {
 	local head_url=""
 	local img_url=""
 	local tag_kw="Debian_Kernel"
+	local arch_kw="amd64"
 
 	if [[ "${OS_TYPE}" == "CentOS" ]]; then
 		# CentOS 目前保留你的写死链接逻辑
 		head_url="https://github.com/ylx2016/kernel/releases/download/Centos_Kernel_6.1.35_latest_bbr_2023.06.22-0855/kernel-headers-6.1.35-1.x86_64.rpm"
 		img_url="https://github.com/ylx2016/kernel/releases/download/Centos_Kernel_6.1.35_latest_bbr_2023.06.22-0855/kernel-6.1.35-1.x86_64.rpm"
 	elif [[ "${OS_TYPE}" == "Debian" ]]; then
-		[[ "$OS_ARCH" == "aarch64" ]] && tag_kw="Debian_Kernel_arm64"
+		if [[ "$OS_ARCH" == "aarch64" ]]; then
+			tag_kw="Debian_Kernel_arm64"
+			arch_kw="arm64"
+		fi
 
 		echo -e "${INFO} 正在向 ylx2016/kernel 请求最新 BBR 内核数据..."
-		head_url=$(get_github_asset "ylx2016/kernel" "${tag_kw}" "headers")
+		head_url=$(get_github_asset "ylx2016/kernel" "${tag_kw}" "headers" "${arch_kw}")
 		# 镜像文件通常不包含 headers 关键字
-		img_url=$(get_github_asset "ylx2016/kernel" "${tag_kw}" "image")
+		img_url=$(get_github_asset "ylx2016/kernel" "${tag_kw}" "image" "${arch_kw}")
 	fi
 
 	# 一行代码完成下载、清理、安装、更新引导全流程
@@ -314,9 +333,9 @@ installbbrplusnew() {
 	[[ "$OS_ARCH" == "aarch64" ]] && arch_kw="arm64"
 
 	echo -e "${INFO} 正在向 UJX6N/bbrplus-6.x_stable 请求数据..."
-	# 利用 jq 的精确解析，你可以根据后缀和架构过滤
-	head_url=$(get_github_asset "UJX6N/bbrplus-6.x_stable" "${tag_kw}" "headers.*${arch_kw}.*${ext}")
-	img_url=$(get_github_asset "UJX6N/bbrplus-6.x_stable" "${tag_kw}" "image.*${arch_kw}.*${ext}")
+	# 利用精准的参数向下传递
+	head_url=$(get_github_asset "UJX6N/bbrplus-6.x_stable" "${tag_kw}" "headers" "${arch_kw}.*${ext}")
+	img_url=$(get_github_asset "UJX6N/bbrplus-6.x_stable" "${tag_kw}" "image" "${arch_kw}.*${ext}")
 
 	install_kernel_generic "BBRplus(UJX6N)新版内核" "$head_url" "$img_url"
 }
@@ -847,7 +866,7 @@ delete_kernel_custom() {
 		fi
 	done
 	echo -e "${INFO} ==================================================="
-	echo -e "${TIP} 💡 提示: 若要强制指定某个内核启动，最安全的做法是【删掉其他所有内核】"
+	echo -e "${TIP} 提示: 排序后默认从最高版本内核启动！"
 	echo ""
 	read -p "请输入要【删除】的内核编号 (多选请用空格分隔，例如 '0 2 3'，直接回车取消): " del_choices
 
@@ -1404,7 +1423,7 @@ check_sys_official() {
 		fi
 	fi
 	BBR_grub
-	echo -e "${TIP} 内核安装完毕，请重启系统。"
+	echo -e "${TIP} 内核安装完毕。"
 }
 
 #检查官方最新内核并安装 (ELRepo / Backports)
@@ -1439,7 +1458,7 @@ check_sys_official_bbr() {
 		fi
 	fi
 	BBR_grub
-	echo -e "${TIP} 内核安装完毕，请重启系统。"
+	echo -e "${TIP} 内核安装完毕。"
 }
 
 # 统一 Xanmod 安装引擎
@@ -1486,7 +1505,7 @@ install_xanmod_generic() {
 	fi
 
 	BBR_grub
-	echo -e "${TIP} 内核安装完毕，请重启系统。"
+	echo -e "${TIP} 内核安装完毕。"
 }
 
 check_sys_official_xanmod_main() { install_xanmod_generic "main"; }
@@ -1511,7 +1530,7 @@ check_sys_official_zen() {
 		echo -e "${ERROR} Zen内核当前脚本仅支持 Debian/Ubuntu !" && exit 1
 	fi
 	BBR_grub
-	echo -e "${TIP} 内核安装完毕，请重启系统。"
+	echo -e "${TIP} 内核安装完毕。"
 }
 
 #检查系统当前状态
